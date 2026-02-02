@@ -1,0 +1,30 @@
+{% extends "base.html" %}
+
+{% block content %}
+<h1>Tamper-Resistant Logs</h1>
+
+<div class="alert {% if is_valid %}success{% else %}error{% endif %}">
+    <strong>Status:</strong> {{ integrity_status }}
+</div>
+
+<table>
+    <thead>
+        <tr>
+            <th>ID</th>
+            <th>Event</th>
+            <th>Timestamp</th>
+            <th>Current Hash</th>
+        </tr>
+    </thead>
+    <tbody>
+        {% for log in logs %}
+        <tr>
+            <td>{{ log.id }}</td>
+            <td>{{ log.event_data }}</td>
+            <td>{{ log.timestamp }}</td>
+            <td class="hash" title="{{ log.current_hash }}">{{ log.current_hash[:16] }}...</td>
+        </tr>
+        {% endfor %}
+    </tbody>
+</table>
+{% endblock %}

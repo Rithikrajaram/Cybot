@@ -1,0 +1,13 @@
+{% extends "base.html" %}
+
+{% block content %}
+<h1>Access Granted</h1>
+<div style="text-align: center;">
+    <p>Welcome, User!</p>
+    <code style="display: block; margin: 20px 0; background: #eee; padding: 10px;">{{ user }}</code>
+
+    <p>You have successfully authenticated using Offline TOTP.</p>
+
+    <a href="/logout"><button style="background: #dc3545;">Logout</button></a>
+</div>
+{% endblock %}

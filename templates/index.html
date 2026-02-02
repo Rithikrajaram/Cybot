@@ -1,0 +1,37 @@
+{% extends "base.html" %}
+
+{% block content %}
+<h1>Offline Login</h1>
+<p style="text-align: center; color: #666;">Enter your Device ID and the TOTP code from your authenticator app.</p>
+
+<form action="/login" method="POST">
+    <label>Device ID</label>
+    <input type="text" id="device_id" name="device_id" placeholder="e.g. 550e8400-e29b..." required>
+
+    <label>TOTP Code</label>
+    <input type="text" name="token" placeholder="6-digit code" pattern="\d{6}" maxlength="6" required
+        autocomplete="off">
+
+    <button type="submit">Verify Offline</button>
+
+    <div style="text-align: center; margin: 15px 0;">
+        <span style="background: #fff; padding: 0 10px; color: #888;">OR</span>
+    </div>
+
+    <button type="button" onclick="loginPasskey()" style="background: #333; border: 1px solid #555;">
+        🔐 Sign in with Passkey
+    </button>
+</form>
+
+<script src="{{ url_for('static', filename='js/passkey.js') }}"></script>
+
+<script>
+    // Auto-fill Device ID if present
+    document.addEventListener('DOMContentLoaded', function () {
+        const savedId = localStorage.getItem('secure_auth_device_id');
+        if (savedId) {
+            document.querySelector('input[name="device_id"]').value = savedId;
+        }
+    });
+</script>
+{% endblock %}

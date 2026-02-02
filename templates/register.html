@@ -1,0 +1,31 @@
+{% extends "base.html" %}
+
+{% block content %}
+<h1>Register New Device</h1>
+<p>Create a unique name for your device to register it with the Secure Enclave.</p>
+
+{% if error %}
+<div class="alert error">{{ error }}</div>
+{% endif %}
+
+<form action="/register" method="POST">
+    <label>Device Name (Username)</label>
+    <input type="text" id="device_name" name="device_name" placeholder="e.g. tarun-laptop" required>
+
+    <button type="submit">Create Device Identity</button>
+
+    <div style="text-align: center; margin: 15px 0;">
+        <span style="background: #fff; padding: 0 10px; color: #888;">OR</span>
+    </div>
+
+    <button type="button" onclick="registerPasskey()" style="background: #333; border: 1px solid #555;">
+        🔐 Register with Passkey
+    </button>
+</form>
+
+<script src="{{ url_for('static', filename='js/passkey.js') }}"></script>
+
+<div style="margin-top: 20px; text-align: center;">
+    <a href="/login">Back to Login</a>
+</div>
+{% endblock %}

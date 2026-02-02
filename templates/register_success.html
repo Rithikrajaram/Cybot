@@ -1,0 +1,24 @@
+{% extends "base.html" %}
+
+{% block content %}
+<h1>Device Registered!</h1>
+<p>Scan this QR code with Google Authenticator or Authy.</p>
+
+<div style="text-align: center; margin: 20px 0;">
+    <img src="data:image/png;base64,{{ qr_data }}" alt="QR Code" style="width: 200px; height: 200px;">
+</div>
+
+<p><strong>Device ID:</strong> <br><code>{{ device_id }}</code></p>
+<p><strong>Secret Seed:</strong> <br><code>{{ secret }}</code></p>
+
+<div class="alert success">
+    Device Identity created. We have saved this ID to your browser for easier login.
+</div>
+
+<a href="/"><button>Go to Login</button></a>
+
+<script>
+    // Auto-save the device ID to LocalStorage
+    localStorage.setItem('secure_auth_device_id', '{{ device_id }}');
+</script>
+{% endblock %}
