@@ -166,6 +166,51 @@ def check_bluetooth_login():
         
     return jsonify({"success": False, "message": "No login detected"}), 200
 
+# --- RSA DEVICE ROUTES (NEW) ---
+
+@app.route('/api/register_device', methods=['POST'])
+def api_register_device():
+    """
+    Registers a mobile device key (Magnetic/NFC) + RSA Public Key.
+    """
+    from auth_manager import register_rsa_device
+    data = request.json
+    device_id = data.get('device_id')
+    nfc_uid = data.get('uid')
+    public_key = data.get('public_key')
+    initial_salt = data.get('initial_salt', '000000000')
+    
+    if not device_id or not nfc_uid or not public_key:
+        return jsonify({"success": False, "message": "Missing required fields"}), 400
+
+    success, msg = register_rsa_device(device_id, nfc_uid, public_key, initial_salt)
+    if success:
+        return jsonify({"success": True, "message": msg})
+    return jsonify({"success": False, "message": msg}), 400
+
+
+@app.route('/api/login_device', methods=['POST'])
+def api_login_device():
+    """
+    Verifies a Signed Login Request (Mag/NFC + RSA Signature + Physics).
+    """
+    from auth_manager import verify_rsa_login
+    data = request.json
+    device_id = data.get('device_id')
+    nfc_uid = data.get('uid')
+    signature = data.get('signature')
+    timestamp = data.get('timestamp')
+    magnetic_proof = data.get('magnetic_proof')
+    magnetic_salt = data.get('magnetic_salt', '000000000')
+
+    if not all([device_id, nfc_uid, signature, timestamp, magnetic_proof]):
+        return jsonify({"success": False, "message": "Missing crypto parameters"}), 400
+
+    success, msg = verify_rsa_login(device_id, nfc_uid, signature, timestamp, magnetic_proof, magnetic_salt)
+    if success:
+        return jsonify({"success": True, "message": msg})
+    return jsonify({"success": False, "message": msg}), 401
+
 # --- PASSKEY ROUTES ---
 
 @app.route('/api/register/passkey/options', methods=['POST'])

@@ -3,6 +3,13 @@ import uuid
 from secure_db import get_db_connection
 from logger import log_event
 import math
+import time
+import base64
+# RSA Imports
+from cryptography.hazmat.primitives import serialization, hashes
+from cryptography.hazmat.primitives.asymmetric import padding
+from cryptography.exceptions import InvalidSignature
+import hashlib
 
 def generate_location_hash_component(alpha, beta, gamma):
     """
@@ -142,3 +149,92 @@ def verify_nfc(nfc_uid):
     else:
         log_event(f"NFC Login Failed: Unknown UID {nfc_uid}")
         return False, None
+
+def register_rsa_device(device_id, nfc_uid, public_key_pem, initial_salt):
+    """
+    Registers the RSA Public Key for a device.
+    """
+    db = get_db_connection()
+    try:
+        # Update One: Add public_key and nfc_uid to the device_id user
+        result = db.users.update_one(
+            {"device_id": device_id},
+            {"$set": {
+                "nfc_uid": nfc_uid,
+                "rsa_public_key": public_key_pem,
+                "last_fusion_salt": initial_salt  # GENESIS SALT
+            }},
+            upsert=True # Auto-create if not exists
+        )
+        
+        # Ensure seed exists if new
+        if result.matched_count == 0 or result.upserted_id:
+             db.users.update_one(
+                {"device_id": device_id},
+                {"$set": {"secret_seed": pyotp.random_base32(), "chain_history": "GENESIS_BLOCK"}}
+             )
+
+        log_event(f"RSA Key Linked: {device_id}")
+        return True, "RSA Key Linked to Device"
+    except Exception as e:
+        return False, str(e)
+
+def verify_rsa_login(device_id, nfc_uid, signature_b64, timestamp, magnetic_proof, magnetic_salt):
+    """
+    Verifies the RSA Signature of the login packet + Fusion Engine Check.
+    Packet: "{device_id}:{nfc_uid}:{timestamp}:{magnetic_proof}:{magnetic_salt}"
+    """
+    db = get_db_connection()
+    try:
+        # 1. Fetch User
+        user = db.users.find_one({"nfc_uid": nfc_uid})
+        if not user:
+            user = db.users.find_one({"device_id": device_id}) # Fallback
+        
+        if not user or 'rsa_public_key' not in user:
+             return False, f"Device not found or missing RSA Key."
+            
+        public_key_pem = user['rsa_public_key']
+        
+        # 2. Reconstruct Data (MUST MATCH FRONTEND EXACTLY)
+        data_to_verify = f"{device_id}:{nfc_uid}:{timestamp}:{magnetic_proof}:{magnetic_salt}".encode('utf-8')
+        
+        # 3. Decode Signature
+        signature = base64.b64decode(signature_b64)
+        
+        # 4. Load Key & Verify
+        public_key = serialization.load_pem_public_key(public_key_pem.encode('utf-8'))
+        public_key.verify(
+            signature,
+            data_to_verify,
+            padding.PKCS1v15(),
+            hashes.SHA256()
+        )
+        
+        # 5. CYBOT FUSION ENGINE (Rolling Hash)
+        history = user.get('chain_history', 'GENESIS_BLOCK')
+        secret = device_id 
+        hardware = nfc_uid
+        physics = magnetic_salt
+        
+        # The Fusion Formula
+        raw_fusion = f"{history}{secret}{hardware}{physics}"
+        fusion_hash = hashlib.sha256(raw_fusion.encode()).hexdigest()
+        
+        print(f"[RSA] Signature Verified. Fusion Hash: {fusion_hash}")
+        
+        # Update Chain
+        db.users.update_one(
+            {"_id": user['_id']},
+            {"$set": {"chain_history": fusion_hash}}
+        )
+        
+        log_event(f"RSA LOGIN SUCCESS: {device_id}")
+        return True, "Signature Verified. Access Granted."
+        
+    except InvalidSignature:
+        log_event(f"RSA FAILURE: Signature Mismatch for {device_id}")
+        return False, "Digital Signature Verification Failed"
+    except Exception as e:
+        log_event(f"RSA ERROR: {e}")
+        return False, f"Crypto Error: {str(e)}"
