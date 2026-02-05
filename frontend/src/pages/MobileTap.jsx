@@ -1,110 +1,142 @@
 
 import React, { useState, useEffect, useRef } from 'react';
-import { Smartphone, CheckCircle, XCircle, Search, AlertTriangle, Unlock, Lock } from 'lucide-react';
-import api from '../services/api';
+import { Smartphone, CheckCircle, XCircle, Search, AlertTriangle, Shield, Check, Lock, Terminal } from 'lucide-react';
+import api, { getRawBaseUrl } from '../services/api';
+import { generateKeyPair, exportKeyToPEM, exportKeyToJWK, importKeyFromJWK, signData } from '../services/crypto';
 
 const MobileTap = () => {
     // Modes: 'nfc' | 'magnetic'
     const [authMode, setAuthMode] = useState('magnetic');
-
-    // Persistent Mobile Identity (The "Key")
-    const [mobileId] = useState(() => {
-        const stored = localStorage.getItem('cybot_mobile_id');
-        if (stored) return stored;
-        const newId = 'Mobile-' + Math.floor(Math.random() * 10000);
-        localStorage.setItem('cybot_mobile_id', newId);
-        return newId;
-    });
-
     const [status, setStatus] = useState('Idle');
     const [error, setError] = useState('');
     const [scanning, setScanning] = useState(false);
+
+    // Identity & Crypto
+    const [mobileId, setMobileId] = useState('');
+    const [rsaKeyPair, setRsaKeyPair] = useState(null);
+    const [publicKeyPEM, setPublicKeyPEM] = useState(null);
+    const [cryptoStatus, setCryptoStatus] = useState('Initializing Secure Enclave...');
+
+    // Magnetic Sensor Data
+    const [magLevel, setMagLevel] = useState(0);
+    const [sensorAvailable, setSensorAvailable] = useState(true);
+    const [radarStage, setRadarStage] = useState('scanning'); // scanning | detected | locked
+
+    // User Inputs
     const [isRegisterMode, setIsRegisterMode] = useState(false);
     const [targetDevice, setTargetDevice] = useState('');
 
-    // Magnetic Radar State
-    const [magLevel, setMagLevel] = useState(0);
-    const [radarStage, setRadarStage] = useState('scanning'); // scanning | detected | locked
-    const [sensorAvailable, setSensorAvailable] = useState(false);
-
-    // Filter noise (simple moving average)
+    // Refs
     const readingsRef = useRef([]);
+    const sensorValuesRef = useRef({ x: 0, y: 0, z: 0 });
     const MAX_READINGS = 5;
-
-    // Refs to avoid stale closures in async NFC/Sensor callbacks
     const isRegisterModeRef = useRef(isRegisterMode);
     const targetDeviceRef = useRef(targetDevice);
 
     useEffect(() => { isRegisterModeRef.current = isRegisterMode; }, [isRegisterMode]);
     useEffect(() => { targetDeviceRef.current = targetDevice; }, [targetDevice]);
 
+    // 1. INITIALIZE IDENTITY & CRYPTO
+    useEffect(() => {
+        const initIdentity = async () => {
+            // A. Mobile ID
+            let storedId = localStorage.getItem('cybot_mobile_id');
+            if (!storedId) {
+                storedId = 'MOB-' + Math.floor(Math.random() * 10000);
+                localStorage.setItem('cybot_mobile_id', storedId);
+            }
+            setMobileId(storedId);
+
+            // B. RSA Keys
+            try {
+                const storedKeyJWK = localStorage.getItem('cybot_private_key');
+                if (storedKeyJWK) {
+                    // Import existing key
+                    const privateKey = await importKeyFromJWK(JSON.parse(storedKeyJWK), 'private');
+                    // We need the public key too, usually typically we'd recreate it or store it too. 
+                    // For simplicity, let's just regenerate keys if public is missing or just store both.
+                    // Actually, let's just generate fresh keys if anything is missing to be safe for this demo.
+                    // Real app would be more persistent.
+                    const storedPublicKeyJWK = localStorage.getItem('cybot_public_key');
+                    if (storedPublicKeyJWK) {
+                        const publicKey = await importKeyFromJWK(JSON.parse(storedPublicKeyJWK), 'public');
+                        setRsaKeyPair({ privateKey, publicKey });
+                        const pem = await exportKeyToPEM(publicKey, 'public');
+                        setPublicKeyPEM(pem);
+                        setCryptoStatus("Enclave Secured: RSA-2048 Ready");
+                    } else {
+                        throw new Error("Missing public key");
+                    }
+                } else {
+                    throw new Error("Missing private key");
+                }
+            } catch (e) {
+                console.log("Generating new keys...", e);
+                setCryptoStatus("Generating RSA-2048 Keypair...");
+                const keys = await generateKeyPair();
+                setRsaKeyPair(keys);
+
+                // Save to storage
+                const privateJWK = await exportKeyToJWK(keys.privateKey);
+                const publicJWK = await exportKeyToJWK(keys.publicKey);
+                localStorage.setItem('cybot_private_key', JSON.stringify(privateJWK));
+                localStorage.setItem('cybot_public_key', JSON.stringify(publicJWK));
+
+                const pem = await exportKeyToPEM(keys.publicKey, 'public');
+                setPublicKeyPEM(pem);
+                setCryptoStatus("Enclave Secured: Keys Generated");
+            }
+        };
+        initIdentity();
+    }, []);
+
+
+    // 2. SENSOR LOGIC (Magnetometer)
     useEffect(() => {
         let magSensor = null;
         let orientationSensor = null;
 
-        const initSensors = async () => {
-            // Priority 1: Magnetometer (Hall Effect Direct)
-            if ('Magnetometer' in window) {
-                try {
-                    const permission = await navigator.permissions.query({ name: 'magnetometer' });
-                    if (permission.state !== 'denied') {
-                        magSensor = new window.Magnetometer({ frequency: 10 });
-                        magSensor.addEventListener('reading', () => {
-                            const { x, y, z } = magSensor;
-                            const magnitude = Math.sqrt(x * x + y * y + z * z);
-                            updateMagLevel(magnitude);
-                        });
-                        magSensor.start();
-                        setSensorAvailable(true);
-                        return; // Found primary, exit
-                    }
-                } catch (err) {
-                    console.log("Magnetometer failed, trying fallback...", err);
-                }
-            }
-
-            // Priority 2: AbsoluteOrientationSensor (Fuse Fallback)
-            if ('AbsoluteOrientationSensor' in window) {
-                try {
-                    const permission = await navigator.permissions.query({ name: 'accelerometer' }); // usually covered by generic
-                    if (permission.state !== 'denied') {
-                        orientationSensor = new window.AbsoluteOrientationSensor({ frequency: 10 });
-                        let lastQuat = null;
-
-                        orientationSensor.addEventListener('reading', () => {
-                            const q = orientationSensor.quaternion;
-                            if (lastQuat) {
-                                // Calculate simple delta/disturbance
-                                const delta = Math.abs(q[0] - lastQuat[0]) + Math.abs(q[1] - lastQuat[1]) + Math.abs(q[2] - lastQuat[2]);
-                                // Map small delta to "uT" (Simulation)
-                                // A magnet causes HUGE swinging variance.
-                                // Reduced sensitivity to prevent false triggering (was 1500)
-                                let simulatedUT = delta * 1000;
-
-                                // Floor it to reduce noise
-                                if (simulatedUT < 25) simulatedUT = 10;
-                                updateMagLevel(simulatedUT);
-                            }
-                            lastQuat = q;
-                        });
-                        orientationSensor.start();
-                        setSensorAvailable(true);
-                        console.log("Using Orientation Sensor Fallback");
-                    }
-                } catch (err) {
-                    console.error("Orientation Sensor failed", err);
-                }
-            }
-        };
-
-        const updateMagLevel = (val) => {
+        const handleReading = (val) => {
             readingsRef.current.push(val);
             if (readingsRef.current.length > MAX_READINGS) readingsRef.current.shift();
-            const avgMag = readingsRef.current.reduce((a, b) => a + b, 0) / readingsRef.current.length;
-            setMagLevel(avgMag);
+            const avg = readingsRef.current.reduce((a, b) => a + b, 0) / readingsRef.current.length;
+            setMagLevel(avg);
         };
 
-        initSensors();
+        if ('Magnetometer' in window) {
+            try {
+                magSensor = new Magnetometer({ frequency: 10 });
+                magSensor.addEventListener('reading', () => {
+                    const total = Math.sqrt(magSensor.x ** 2 + magSensor.y ** 2 + magSensor.z ** 2);
+                    sensorValuesRef.current = { x: magSensor.x, y: magSensor.y, z: magSensor.z };
+                    handleReading(total);
+                });
+                magSensor.start();
+            } catch (e) {
+                console.error("Magnetometer failed", e);
+                setSensorAvailable(false);
+            }
+        } else if ('AbsoluteOrientationSensor' in window) {
+            // Fallback for some Androids
+            try {
+                orientationSensor = new AbsoluteOrientationSensor({ frequency: 10 });
+                let lastQuat = null;
+                orientationSensor.addEventListener('reading', () => {
+                    const q = orientationSensor.quaternion;
+                    if (lastQuat) {
+                        const delta = Math.abs(q[0] - lastQuat[0]) + Math.abs(q[1] - lastQuat[1]) + Math.abs(q[2] - lastQuat[2]);
+                        handleReading(delta * 1000 + 25); // Simulate uT
+                    }
+                    lastQuat = q;
+                });
+                orientationSensor.start();
+            } catch (e) {
+                console.error("Orientation sensor failed", e);
+                setSensorAvailable(false);
+            }
+        } else {
+            setSensorAvailable(false);
+        }
 
         return () => {
             if (magSensor) magSensor.stop();
@@ -112,303 +144,205 @@ const MobileTap = () => {
         };
     }, []);
 
-    const playSuccessSound = () => {
-        try {
-            const ctx = new (window.AudioContext || window.webkitAudioContext)();
-            const osc = ctx.createOscillator();
-            const gain = ctx.createGain();
-            osc.connect(gain);
-            gain.connect(ctx.destination);
-            osc.frequency.setValueAtTime(1200, ctx.currentTime);
-            osc.frequency.exponentialRampToValueAtTime(600, ctx.currentTime + 0.15);
-            gain.gain.setValueAtTime(0.3, ctx.currentTime);
-            gain.gain.exponentialRampToValueAtTime(0.01, ctx.currentTime + 0.15);
-            osc.type = 'sine';
-            osc.start();
-            osc.stop(ctx.currentTime + 0.2);
-        } catch (e) {
-            console.error("Audio failed", e);
-        }
-    };
-
-    // Sensitivity Control
-    // Default tuned to User's hardware (210 uT)
-    const [threshold, setThreshold] = useState(210);
-
-    // NFC AUTO-START: When switching to NFC mode, start the scanner immediately
-    useEffect(() => {
-        if (authMode === 'nfc' && !scanning) {
-            startScan();
-        }
-    }, [authMode]);
-
-    // Radar Logic Flow
-    useEffect(() => {
-        if (magLevel > threshold) {
-            if (radarStage !== 'locked') {
-                setRadarStage('locked');
-                playSuccessSound();
-
-                // ACTION: Trigger based on Mode
-                if (authMode === 'magnetic' && !scanning) {
-                    handleMagneticAuth();
-                } else if (authMode === 'nfc' && !scanning) {
-                    // Auto-start scan if magnet brings it to locked, though useEffect above handles mode switch
-                    startScan();
-                }
-            }
-        } else if (magLevel > (threshold * 0.4)) { // Detected is 40% of Locked
-            if (radarStage !== 'locked') setRadarStage('detected');
-        } else {
-            if (radarStage !== 'locked') {
-                // In NFC mode, we stay in "detected" state visually if scanner is ON
-                // to show we are ready even if far from magnet
-                setRadarStage(authMode === 'nfc' && scanning ? 'detected' : 'scanning');
-            }
-        }
-    }, [magLevel, authMode, threshold, scanning]);
-
-    const handleMagneticAuth = async () => {
+    // 3. AUTH LOGIC (The "Fusion")
+    const performSecureAuth = async (triggerType, nfcUid = null) => {
+        if (!rsaKeyPair) return;
         setScanning(true);
-        setStatus("Authenticating via Sensor...");
+
+        const mode = isRegisterModeRef.current ? 'REGISTER' : 'LOGIN';
+        const deviceId = targetDeviceRef.current || (new URLSearchParams(window.location.search).get('target') || 'PC-Unknown');
+
+        setStatus(mode === 'REGISTER' ? "Signing Identity..." : "Calculating RSA Signature...");
+
         try {
-            // We treat "Magnetic Presence" as a valid credential for the TARGET DEVICE
-            const deviceID = targetDeviceRef.current || (new URLSearchParams(window.location.search).get('target') || 'PC-Unknown');
+            // payload construction
+            const timestamp = Date.now();
+            const magneticProof = magLevel.toFixed(2);
+            const uidToUse = nfcUid || `MagKey-${mobileId}`;
 
-            // Reuse the /register/nfc endpoint but with a special UID
-            // UID is now tied to the MOBILE DEVICE, not the PC
-            await api.post('/register/nfc', {
-                device_id: deviceID,
-                nfc_uid: `MagKey-${mobileId}`,
-                force_login: !isRegisterModeRef.current
-            });
-            const msg = isRegisterModeRef.current ? 'Sensor Registered!' : 'Login Successful!';
-            setStatus(msg);
-            setRadarStage('locked'); // Force locked for success UI
+            // PHYSICS SALT EXTRACTION (Micro-Jitter)
+            const getJitter = (n) => (n.toFixed(5).split('.')[1] || "000").slice(-3);
+            const { x, y, z } = sensorValuesRef.current;
+            const physicsSalt = getJitter(x) + getJitter(y) + getJitter(z);
 
+            // The data to sign (Now includes the Physics Salt)
+            const dataToSign = `${deviceId}:${uidToUse}:${timestamp}:${magneticProof}:${physicsSalt}`;
+
+            // Sign it!
+            const signature = await signData(rsaKeyPair.privateKey, dataToSign);
+
+            if (mode === 'REGISTER') {
+                // Register: Send Public Key
+                await api.post('/register_device', {
+                    device_id: deviceId,
+                    uid: uidToUse,
+                    public_key: publicKeyPEM,
+                    type: triggerType,
+                    initial_salt: physicsSalt // Initial Genesis Salt
+                });
+                setStatus("Device & Public Key Registered!");
+            } else {
+                // Login: Send Signature
+                await api.post('/login_device', {
+                    device_id: deviceId,
+                    uid: uidToUse,
+                    timestamp: timestamp,
+                    magnetic_proof: magneticProof,
+                    magnetic_salt: physicsSalt, // Live Physics
+                    signature: signature
+                });
+                setStatus("Signature Verified. Access Granted.");
+            }
+
+            setRadarStage('locked');
             setTimeout(() => {
                 setScanning(false);
                 setRadarStage('scanning');
                 setStatus('Idle');
             }, 3000);
+
         } catch (e) {
-            setError("Magnetic Auth Failed: " + e.message);
+            console.error(e);
+            const baseUrl = getRawBaseUrl();
+            if (e.message === "Network Error") {
+                setError(
+                    <span>
+                        Network Error connecting to <b>{baseUrl}</b>.<br />
+                        1. Check Laptop firewall.<br />
+                        2. <a href={`${baseUrl}/api/status`} target="_blank" className="underline text-red-300 font-bold">Trust Cert Again</a>
+                    </span>
+                );
+            } else {
+                setError("Auth Failed: " + (e.response?.data?.message || e.message));
+            }
             setScanning(false);
         }
     };
 
+    // NFC Trigger
     const startScan = async () => {
         if (!('NDEFReader' in window)) {
-            // If checking on desktop without NFC, just simulate for UI demo if Locked
-            if (radarStage === 'locked') {
-                setStatus("Simulated NFC Scan (Desktop Mode)");
-                // Simulate API call
-                try {
-                    await api.post('/register/nfc', {
-                        device_id: targetDeviceRef.current || 'PC-Unknown',
-                        nfc_uid: 'SIMULATED-UID-' + Math.floor(Math.random() * 1000),
-                        force_login: !isRegisterModeRef.current
-                    });
-                    setStatus(isRegisterModeRef.current ? 'Card Registered!' : 'Login Success!');
-                } catch (e) {
-                    // ignore network err for demo
-                }
-                return;
-            }
-            setError('NFC not supported. Use Chrome on Android with HTTPS.');
+            // Simulation for desktop
+            performSecureAuth('NFC_SIM', 'SIMULATED-NFC-' + Math.floor(Math.random() * 1000));
             return;
         }
-
-        if (isRegisterMode && !targetDevice) {
-            setError('Please enter a Device ID to register this card.');
-            return;
-        }
-
         try {
-            const ndef = new parse_NDEFReader();
+            const ndef = new NDEFReader();
             await ndef.scan();
             setScanning(true);
-            setStatus(isRegisterMode ? 'Ready to Register Tap...' : 'Ready to Login Tap...');
-            setError('');
+            setStatus("READY TO TAP CARD");
 
-            ndef.onreading = async (event) => {
-                const uid = event.serialNumber;
-                setStatus(`Card Found: ${uid}`);
-
-                try {
-                    const currentIsRegister = isRegisterModeRef.current;
-                    const currentTarget = targetDeviceRef.current;
-
-                    await api.post('/register/nfc', {
-                        device_id: currentIsRegister ? currentTarget : (new URLSearchParams(window.location.search).get('target') || currentTarget || 'PC-Unknown'),
-                        nfc_uid: uid,
-                        force_login: !currentIsRegister
-                    });
-
-                    const msg = currentIsRegister ? 'Card Linked!' : 'NFC Login Success!';
-                    setStatus(msg);
-                    setRadarStage('locked');
-
-                    setTimeout(() => {
-                        setScanning(false);
-                        setRadarStage('scanning');
-                        setStatus('Idle');
-                    }, 3000);
-                } catch (e) {
-                    if (e.message === "Network Error") {
-                        setError(
-                            <span>
-                                Connection Blocked. <a href="https://10.32.50.222:5000/api/status" target="_blank" className="underline text-red-300">Click to Trust Cert</a>
-                            </span>
-                        );
-                    } else {
-                        setError(`Failed: ${e.response?.data?.message || e.message}`);
-                    }
-                    setScanning(false);
-                }
+            ndef.onreading = (event) => {
+                performSecureAuth('NFC', event.serialNumber);
             };
-        } catch (error) {
-            setError(`Scan Error: ${error}`);
-            setScanning(false);
+        } catch (e) {
+            setError("NFC Error: " + e.message);
         }
     };
 
-    const parse_NDEFReader = window.NDEFReader || class { scan() { throw "Not Supported"; } };
+    // Magnetic Trigger
+    const [threshold] = useState(210);
+    useEffect(() => {
+        // Auto-start NFC scan if in NFC mode
+        if (authMode === 'nfc' && !scanning) startScan();
 
-    // --- VISUAL COMPUTATIONS ---
+        if (magLevel > threshold) {
+            if (radarStage !== 'locked') {
+                setRadarStage('locked');
+                // Only trigger if in Magnetic Mode AND not already busy
+                if (authMode === 'magnetic' && !scanning) {
+                    performSecureAuth('MAGNETIC');
+                }
+            }
+        } else if (magLevel > (threshold * 0.4)) {
+            if (radarStage !== 'locked') setRadarStage('detected');
+        } else {
+            if (radarStage !== 'locked') {
+                setRadarStage(authMode === 'nfc' && scanning ? 'detected' : 'scanning');
+            }
+        }
+    }, [magLevel, authMode, threshold, scanning]);
+
+
+    // --- VISUALS ---
     const getRadarColor = () => {
-        if (authMode === 'nfc') {
-            if (radarStage === 'locked') return 'bg-green-500 border-green-500 shadow-[0_0_50px_rgba(34,197,94,0.6)]';
-            return 'bg-purple-600 border-purple-500 shadow-[0_0_30px_rgba(147,51,234,0.5)]';
-        }
+        if (radarStage === 'locked') return 'bg-green-500 border-green-500 shadow-[0_0_50px_rgba(34,197,94,0.6)]';
+        if (authMode === 'nfc') return 'bg-purple-600 border-purple-500 shadow-[0_0_30px_rgba(147,51,234,0.5)]';
 
-        switch (radarStage) {
-            case 'locked': return 'bg-green-500 border-green-500 shadow-[0_0_50px_rgba(34,197,94,0.6)]';
-            case 'detected': return 'bg-yellow-500 border-yellow-500 shadow-[0_0_30px_rgba(234,179,8,0.4)]';
-            default: return 'bg-blue-500 border-blue-500 shadow-[0_0_20px_rgba(59,130,246,0.3)]';
-        }
+        // Mag detected vs scanning
+        if (radarStage === 'detected') return 'bg-yellow-500 border-yellow-500 shadow-[0_0_30px_rgba(234,179,8,0.4)]';
+        return 'bg-blue-500 border-blue-500 shadow-[0_0_20px_rgba(59,130,246,0.3)]';
     };
 
     const getIcon = () => {
         if (radarStage === 'locked') return <CheckCircle className="w-24 h-24 text-white animate-[bounce_0.5s_ease-in-out_infinite]" />;
-
-        if (authMode === 'nfc' && radarStage !== 'locked') {
-            return <Smartphone className="w-20 h-20 text-white animate-pulse" />;
-        }
-        switch (radarStage) {
-            case 'detected': return <AlertTriangle className="w-20 h-20 text-white animate-[ping_0.5s_cubic-bezier(0,0,0.2,1)_infinite]" />;
-            default: return <Search className="w-16 h-16 text-white/70 animate-pulse" />;
-        }
-    };
-
-    const getText = () => {
-        if (radarStage === 'locked') return status.toUpperCase();
-        if (authMode === 'nfc') return scanning ? "TAP CARD NOW" : "READY TO TAP";
-
-        switch (radarStage) {
-            case 'detected': return "TERMINAL DETECTED...";
-            default: return "SCANNING AREA...";
-        }
-    };
-
-    const getProgress = () => {
-        switch (radarStage) {
-            case 'locked': return 100;
-            case 'detected': return 60 + (Math.random() * 10); // Jitter
-            default: return 10;
-        }
+        if (authMode === 'nfc') return <Smartphone className="w-20 h-20 text-white animate-pulse" />;
+        if (radarStage === 'detected') return <AlertTriangle className="w-20 h-20 text-white animate-ping" />;
+        return <Search className="w-16 h-16 text-white/70 animate-pulse" />;
     };
 
     return (
-        <div className="h-screen bg-black text-white flex flex-col items-center justify-center p-6 text-center overflow-hidden relative">
-
+        <div className="h-screen bg-black text-white flex flex-col items-center justify-center p-6 text-center overflow-hidden relative font-mono">
+            {/* Background Grid */}
             <div className="absolute inset-0 z-0 opacity-20 pointer-events-none" style={{ backgroundImage: 'linear-gradient(#333 1px, transparent 1px), linear-gradient(90deg, #333 1px, transparent 1px)', backgroundSize: '40px 40px' }}></div>
 
-            <h1 className="text-3xl font-bold mb-4 z-10 relative">Cybot Security</h1>
-            <div className="z-10 relative mb-6 text-xs text-gray-500 font-mono">
-                Mobile Key: <span className="text-blue-400">{mobileId}</span>
+            {/* Header */}
+            <div className="z-10 relative mb-4">
+                <h1 className="text-3xl font-bold tracking-tighter flex items-center justify-center gap-2">
+                    <Shield className="w-8 h-8 text-green-500" />
+                    CYBOT <span className="text-xs align-top border border-green-500/50 px-1 rounded text-green-500">RSA-2048</span>
+                </h1>
+                <div className="text-[10px] text-gray-500 mt-1">{mobileId}</div>
             </div>
 
-            {/* MODE TOGGLE */}
-            <div className="flex bg-gray-900 rounded-full p-1 mb-6 z-20 border border-gray-700">
-                <button
-                    onClick={() => setAuthMode('magnetic')}
-                    className={`px-6 py-2 rounded-full text-sm font-bold transition-all ${authMode === 'magnetic' ? 'bg-blue-600 text-white shadow-lg shadow-blue-900/50' : 'text-gray-400 hover:text-white'}`}
-                >
-                    Magnetic Sensor
-                </button>
-                <button
-                    onClick={() => setAuthMode('nfc')}
-                    className={`px-6 py-2 rounded-full text-sm font-bold transition-all ${authMode === 'nfc' ? 'bg-purple-600 text-white shadow-lg shadow-purple-900/50' : 'text-gray-400 hover:text-white'}`}
-                >
-                    NFC Card
-                </button>
+            {/* Crypto Status */}
+            <div className="z-10 mb-6 flex items-center gap-2 text-xs text-green-400 bg-green-900/20 px-3 py-1 rounded-full border border-green-900/50">
+                <Lock className="w-3 h-3" />
+                {cryptoStatus}
             </div>
-            {/* Stage Indicator (Debug/Dev) - ONLY IN MAGNETIC MODE */}
-            {authMode === 'magnetic' && (
-                <div className="absolute top-4 right-4 text-xs font-mono text-gray-500 text-right z-20">
-                    <div>uT (Raw): {magLevel.toFixed(1)}</div>
-                    <div>Stage: {radarStage}</div>
-                    {!sensorAvailable && <div className="text-red-500">Using Gyro Fallback</div>}
-                </div>
-            )}
 
-            <div className="flex bg-gray-800 rounded-full p-1 mb-8 gap-2 z-10 relative">
-                <button onClick={() => setIsRegisterMode(false)} className={`px-6 py-2 rounded-full text-sm font-bold transition-colors ${!isRegisterMode ? 'bg-gray-600 text-white' : 'text-gray-400'}`}>Login</button>
-                <button onClick={() => setIsRegisterMode(true)} className={`px-6 py-2 rounded-full text-sm font-bold transition-colors ${isRegisterMode ? 'bg-green-600 text-white' : 'text-gray-400'}`}>Register</button>
+            {/* Toggles */}
+            <div className="flex bg-gray-900 rounded-full p-1 mb-8 z-20 border border-gray-700">
+                <button onClick={() => setAuthMode('magnetic')} className={`px-6 py-2 rounded-full text-sm font-bold transition-all ${authMode === 'magnetic' ? 'bg-blue-600 shadow-blue-900/50' : 'text-gray-400'}`}>Magnetic</button>
+                <button onClick={() => setAuthMode('nfc')} className={`px-6 py-2 rounded-full text-sm font-bold transition-all ${authMode === 'nfc' ? 'bg-purple-600 shadow-purple-900/50' : 'text-gray-400'}`}>NFC Card</button>
+            </div>
+
+            {/* Register/Login Toggle */}
+            <div className="flex bg-gray-800 rounded-full p-1 mb-6 z-10">
+                <button onClick={() => setIsRegisterMode(false)} className={`w-32 py-2 rounded-full text-sm font-bold transition-colors ${!isRegisterMode ? 'bg-gray-600 text-white' : 'text-gray-400'}`}>LOGIN</button>
+                <button onClick={() => setIsRegisterMode(true)} className={`w-32 py-2 rounded-full text-sm font-bold transition-colors ${isRegisterMode ? 'bg-green-600 text-white' : 'text-gray-400'}`}>REGISTER</button>
             </div>
 
             {isRegisterMode && (
-                <div className="w-full max-w-xs mb-8 z-10">
-                    <label className="text-xs text-gray-400 uppercase font-bold mb-2 block">Link to Device ID</label>
-                    <input
-                        type="text"
-                        value={targetDevice}
-                        onChange={(e) => setTargetDevice(e.target.value)}
-                        placeholder="Enter Device ID from PC"
-                        className="w-full bg-gray-900 border border-gray-700 rounded-lg p-3 text-white text-center font-mono focus:border-green-500 outline-none"
-                    />
-                </div>
+                <input
+                    value={targetDevice}
+                    onChange={e => setTargetDevice(e.target.value)}
+                    placeholder="Enter Host ID (e.g. PC-1)"
+                    className="z-10 mb-8 bg-gray-900 border border-gray-700 text-center text-white p-3 rounded w-64 focus:border-green-500 outline-none"
+                />
             )}
 
-            {/* Sensitivity Calibrated (210uT) */}
-
-            {/* MAIN RADAR UI */}
-            <div className="relative mb-12 z-10">
-                {/* Ripples */}
-                {radarStage === 'scanning' && (
-                    <>
-                        <div className={`absolute inset-0 rounded-full border ${authMode === 'nfc' ? 'border-purple-500/30' : 'border-blue-500/30'} animate-[ping_3s_linear_infinite]`}></div>
-                        <div className={`absolute inset-0 rounded-full border ${authMode === 'nfc' ? 'border-purple-500/20' : 'border-blue-500/20'} animate-[ping_3s_linear_infinite_1s]`}></div>
-                    </>
-                )}
-
-                {/* Jitter Effect Wrapper */}
-                <div className={`transition-all duration-300 ${radarStage === 'detected' ? 'animate-[spin_0.1s_linear_infinite] translate-x-1' : ''} ${radarStage === 'locked' ? 'scale-125' : ''}`}>
-                    <div className={`w-48 h-48 rounded-full flex items-center justify-center border-4 transition-all duration-500 ${getRadarColor()}`}>
-                        {getIcon()}
-                    </div>
+            {/* MAIN RADAR */}
+            <div className="relative mb-8 z-10 transition-all duration-300">
+                <div className={`w-64 h-64 rounded-full flex items-center justify-center border-4 transition-all duration-500 ${getRadarColor()} ${radarStage === 'locked' ? 'scale-110' : ''}`}>
+                    {getIcon()}
                 </div>
             </div>
 
-            <div className={`text-2xl font-mono font-bold mb-8 tracking-widest transition-colors duration-300 ${radarStage === 'locked' ? 'text-green-400' : (radarStage === 'detected' ? 'text-yellow-400' : 'text-blue-400 animate-pulse')}`}>
-                {getText()}
+            {/* Status & Error */}
+            <div className="z-10 h-12 flex flex-col items-center justify-center">
+                <div className={`text-xl font-bold tracking-widest ${radarStage === 'locked' ? 'text-green-400' : 'text-blue-400'}`}>
+                    {radarStage === 'locked' ? status.toUpperCase() : (authMode === 'nfc' && scanning ? "TAP CARD NOW" : "SEARCHING...")}
+                </div>
+                {error && <div className="text-red-500 text-xs mt-2 max-w-xs">{error}</div>}
             </div>
 
-            {/* Progress Bar */}
-            <div className="w-64 h-2 bg-gray-800 rounded-full overflow-hidden mb-8 border border-white/10 z-10">
-                <div
-                    className={`h-full transition-all duration-300 ${radarStage === 'locked' ? 'bg-green-500' : (radarStage === 'detected' ? 'bg-yellow-500' : 'bg-blue-500')}`}
-                    style={{ width: `${getProgress()}%` }}
-                ></div>
-            </div>
-
-            {/* Manual Override / Status */}
-            <p className="text-sm text-gray-500 mb-8 max-w-xs mx-auto z-10">{status}</p>
-
-            {error && <div className="bg-red-900/50 p-4 rounded-lg mb-8 text-red-200 border border-red-500 text-sm max-w-xs break-words z-10">{error}</div>}
-
-            {/* Manual Controls Removed for "Magic" Experience */}
+            {/* Debug Info (Only in Mag Mode) */}
+            {authMode === 'magnetic' && (
+                <div className="absolute bottom-4 left-0 right-0 text-[10px] text-gray-600 font-mono">
+                    SENSOR: {magLevel.toFixed(1)} uT
+                </div>
+            )}
         </div>
     );
 };

@@ -1,6 +1,6 @@
 import React, { useState } from 'react';
 import { Shield, Key, Smartphone, Loader2, ArrowLeft, CheckCircle2 } from 'lucide-react';
-import api from '../services/api';
+import api, { getRawBaseUrl } from '../services/api';
 import { loginPasskey } from '../services/passkey';
 
 const Login = ({ onLoginSuccess }) => {
@@ -99,7 +99,7 @@ const Login = ({ onLoginSuccess }) => {
                     setWaitingForBluetooth(false);
                     setError(
                         <div>
-                            Connection Blocked. <a href="https://localhost:5000/api/status" target="_blank" className="underline text-red-300">Click here</a> to trust the backend certificate.
+                            Connection Blocked. <a href={`${getRawBaseUrl()}/api/status`} target="_blank" className="underline text-red-300">Click here</a> to trust the backend certificate.
                         </div>
                     );
                 }
@@ -110,7 +110,7 @@ const Login = ({ onLoginSuccess }) => {
                 setWaitingForBluetooth(false);
                 setError('Bluetooth login timed out. Please try again.');
             }
-        }, 2000);
+        }, 1000);
 
         return () => clearInterval(pollInterval);
     };

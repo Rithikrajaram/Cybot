@@ -1,6 +1,6 @@
 import React, { useState } from 'react';
 import { Shield, Smartphone, ArrowLeft, CheckCircle2, Copy, Download, Key } from 'lucide-react';
-import api from '../services/api';
+import api, { getRawBaseUrl } from '../services/api';
 import { registerPasskey } from '../services/passkey';
 
 const Register = () => {
@@ -23,7 +23,7 @@ const Register = () => {
                 setError(
                     <span>
                         Connection Failed. Is the backend running? <br />
-                        <a href="https://localhost:5000/api/status" target="_blank" className="underline text-red-300 font-bold">Check Server Status / Trust Cert</a>
+                        <a href={`${getRawBaseUrl()}/api/status`} target="_blank" className="underline text-red-300 font-bold">Check Server Status / Trust Cert</a>
                     </span>
                 );
             } else {

@@ -1,8 +1,17 @@
 import pyotp
 import uuid
+import base64
 from secure_db import get_db_connection
 from logger import log_event
 import math
+import time
+
+# RSA Imports
+from cryptography.hazmat.primitives import serialization, hashes
+from cryptography.hazmat.primitives.asymmetric import padding
+from cryptography.exceptions import InvalidSignature
+
+# ... existing code ...
 
 def generate_location_hash_component(alpha, beta, gamma):
     """
@@ -142,3 +151,130 @@ def verify_nfc(nfc_uid):
     else:
         log_event(f"NFC Login Failed: Unknown UID {nfc_uid}")
         return False, None
+
+def register_rsa_device(device_id, nfc_uid, public_key_pem, initial_salt):
+    """
+    Registers the RSA Public Key for a device.
+    """
+    db = get_db_connection()
+    try:
+        # Update One: Add public_key and nfc_uid to the device_id user
+        result = db.users.update_one(
+            {"device_id": device_id},
+            {"$set": {
+                "nfc_uid": nfc_uid,
+                "rsa_public_key": public_key_pem,
+                "last_fusion_salt": initial_salt  # GENESIS SALT
+            }}
+        )
+        
+        if result.matched_count == 0:
+            # Create new if doesn't exist
+            new_seed = pyotp.random_base32()
+            db.users.insert_one({
+                "device_id": device_id,
+                "nfc_uid": nfc_uid,
+                "secret_seed": new_seed,
+                "rsa_public_key": public_key_pem,
+                "last_fusion_salt": initial_salt,
+                "chain_history": "GENESIS_BLOCK"
+            })
+            log_event(f"New RSA Device Created: {device_id}")
+            return True, "Registered new device with RSA Key"
+            
+        log_event(f"RSA Key Updated: {device_id}")
+        return True, "RSA Key Linked to Device"
+    except Exception as e:
+        return False, str(e)
+
+
+def verify_rsa_login(device_id, nfc_uid, signature_b64, timestamp, magnetic_proof, magnetic_salt):
+    """
+    Verifies the RSA Signature of the login packet.
+    Packet: "{device_id}:{nfc_uid}:{timestamp}:{magnetic_proof}:{magnetic_salt}"
+    """
+    db = get_db_connection()
+    try:
+        # 1. Fetch User by UID (Mobile Key)
+        user = db.users.find_one({"nfc_uid": nfc_uid})
+        
+        if not user:
+            # Fallback
+            user = db.users.find_one({"device_id": device_id})
+            if not user or 'rsa_public_key' not in user:
+                 return False, f"Mobile Key {nfc_uid} not found or missing RSA."
+            
+        public_key_pem = user['rsa_public_key']
+        
+        # 2. Reconstruct Data (MUST MATCH FRONTEND EXACTLY)
+        data_to_verify = f"{device_id}:{nfc_uid}:{timestamp}:{magnetic_proof}:{magnetic_salt}".encode('utf-8')
+        
+        print("\n" + "="*50)
+        print(f"🔒 CYBOT SECURE ENCLAVE -- RSA VERIFICATION 🔒")
+        print(f"📡 Incoming Payload: {data_to_verify}")
+        
+        # 3. Decode Signature
+        signature = base64.b64decode(signature_b64)
+        print(f"✍️  Digital Signature: {signature_b64[:30]}...[TRUNCATED]")
+        
+        # 4. Load Key
+        public_key = serialization.load_pem_public_key(
+            public_key_pem.encode('utf-8')
+        )
+        print(f"🔑 Public Key Loaded. Verifying...")
+        
+        # 5. Verify
+        public_key.verify(
+            signature,
+            data_to_verify,
+            padding.PKCS1v15(),
+            hashes.SHA256()
+        )
+        
+        print(f"✅ CRYTPO CHECK PASSED: Signature Matches Public Key!")
+        
+        # --- CYBOT FUSION ENGINE ---
+        import hashlib
+        
+        history = user.get('chain_history', 'GENESIS_BLOCK')
+        secret = device_id # Using Device ID as the "Secret/Password" for this flow
+        hardware = nfc_uid
+        physics = magnetic_salt
+        
+        # The Fusion Formula
+        raw_fusion = f"{history}{secret}{hardware}{physics}"
+        fusion_hash = hashlib.sha256(raw_fusion.encode()).hexdigest()
+        
+        print("\n🧪 CYBOT FUSION ENGINE INITIALIZED")
+        print(f"   ├── 📜 History:   {history[:15]}...")
+        print(f"   ├── 🔐 Secret:    {secret}")
+        print(f"   ├── 💳 Hardware:  {hardware}")
+        print(f"   └── 🌌 Physics:   {physics} (Micro-Jitter)")
+        print("-" * 40)
+        print(f"🔥 FUSION HASH: {fusion_hash}")
+        print("="*50 + "\n")
+        
+        # Update Chain for Next Time
+        db.users.update_one(
+            {"_id": user['_id']},
+            {"$set": {"chain_history": fusion_hash}}
+        )
+
+        
+        # 6. Success! Create Pending Login for Laptop
+        db.pending_bluetooth_logins.insert_one({
+            "device_id": device_id,
+            "timestamp": time.time(),
+            "consumed": False,
+            "method": "RSA_CRYPTO_MAGNETIC"
+        })
+        
+        log_event(f"RSA LOGIN VERIFIED: {device_id} (Mag: {magnetic_proof})")
+        return True, "Signature Verified. Access Granted."
+        
+    except InvalidSignature:
+        log_event(f"RSA FAILURE: Signature Mismatch for {device_id}")
+        return False, "Digital Signature Verification Failed"
+    except Exception as e:
+        log_event(f"RSA ERROR: {e}")
+        return False, f"Crypto Error: {str(e)}"
