@@ -18,7 +18,17 @@ const Register = () => {
             const resp = await api.post('/register', { device_name: deviceName });
             setRegistrationData(resp.data);
         } catch (err) {
-            setError(err.response?.data?.message || 'Registration failed');
+            console.error("Registration failed:", err);
+            if (err.message === "Network Error") {
+                setError(
+                    <span>
+                        Connection Failed. Is the backend running? <br />
+                        <a href="https://localhost:5000/api/status" target="_blank" className="underline text-red-300 font-bold">Check Server Status / Trust Cert</a>
+                    </span>
+                );
+            } else {
+                setError(err.response?.data?.message || 'Registration failed');
+            }
         } finally {
             setLoading(false);
         }

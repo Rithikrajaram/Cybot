@@ -8,6 +8,8 @@ import Logs from './pages/Logs';
 import api from './services/api';
 
 import Landing from './pages/Landing';
+import MobileTap from './pages/MobileTap.jsx';
+import SensorCheck from './pages/SensorCheck.jsx';
 
 function App() {
   const [user, setUser] = useState(null);
@@ -56,6 +58,8 @@ function App() {
             <Route path="/register" element={user ? <Navigate to="/dashboard" /> : <Register />} />
             <Route path="/dashboard" element={user ? <Dashboard user={user} /> : <Navigate to="/" />} />
             <Route path="/logs" element={user ? <Logs /> : <Navigate to="/" />} />
+            <Route path="/mobile-tap" element={<MobileTap />} />
+            <Route path="/sensor-check" element={<SensorCheck />} />
           </Routes>
         </main>
       </div>

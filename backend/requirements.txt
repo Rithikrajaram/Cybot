@@ -6,3 +6,5 @@ pyopenssl
 webauthn
 cryptography
 Pillow
+pymongo
+dnspython

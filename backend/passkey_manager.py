@@ -47,35 +47,28 @@ def store_credential(user_id, credential_id, public_key, sign_count, transports=
     """
     Store the verified credential in the database.
     """
-    conn = get_db_connection()
-    c = conn.cursor()
-    # Normalize transports to None if empty list
-    transports_str = ",".join(transports) if transports else None
+    db = get_db_connection()
     
     try:
-        c.execute('''
-            INSERT INTO credentials (user_id, credential_id, public_key, sign_count, transports)
-            VALUES (?, ?, ?, ?, ?)
-        ''', (user_id, credential_id, public_key, sign_count, transports_str))
-        conn.commit()
+        db.credentials.insert_one({
+            "user_id": user_id,
+            "credential_id": credential_id,
+            "public_key": public_key,
+            "sign_count": sign_count,
+            "transports": transports
+        })
     except Exception as e:
         print(f"Error storing credential: {e}")
-        conn.close()
         return False, str(e)
     
-    conn.close()
     return True, "Success"
 
 def get_credentials(user_id):
     """
     Retrieve credentials for a given user.
     """
-    conn = get_db_connection()
-    c = conn.cursor()
-    c.execute('SELECT * FROM credentials WHERE user_id = ?', (user_id,))
-    rows = c.fetchall()
-    conn.close()
-    return rows
+    db = get_db_connection()
+    return list(db.credentials.find({"user_id": user_id}))
 
 def verify_reg_response(response_data, challenge, user_id):
     """
@@ -270,8 +263,7 @@ def verify_auth_response(response_data, challenge, user_id):
         # ... logic continues ...
         
         # Look up credential in DB
-        conn = get_db_connection()
-        c = conn.cursor()
+        db = get_db_connection()
         # Handle the fact that credential.id is base64url string, but we might store as BLOB or string
         # passkey.js sends id as base64url string.
         # We store credential_id as BLOB in DB (from registration).
@@ -279,9 +271,7 @@ def verify_auth_response(response_data, challenge, user_id):
         # credential.raw_id is bytes. Let's use that.
         cred_id_bytes = credential.raw_id
         
-        c.execute('SELECT * FROM credentials WHERE credential_id = ?', (cred_id_bytes,))
-        row = c.fetchone()
-        conn.close()
+        row = db.credentials.find_one({"credential_id": cred_id_bytes})
         
         if not row:
             print("Credential not found in DB")
@@ -300,11 +290,10 @@ def verify_auth_response(response_data, challenge, user_id):
         )
         
         # Update sign count
-        step_conn = get_db_connection()
-        step_c = step_conn.cursor()
-        step_c.execute('UPDATE credentials SET sign_count = ? WHERE id = ?', (auth_verification.new_sign_count, row['id']))
-        step_conn.commit()
-        step_conn.close()
+        db.credentials.update_one(
+            {"_id": row['_id']},
+            {"$set": {"sign_count": auth_verification.new_sign_count}}
+        )
         
         return True, row['user_id']
     except Exception as e:

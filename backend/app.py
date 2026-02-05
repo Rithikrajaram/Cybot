@@ -4,7 +4,7 @@ import qrcode
 import io
 import base64
 import json
-from auth_manager import register_device, get_totp_uri, verify_login
+from auth_manager import register_device, get_totp_uri, verify_login, register_nfc
 from passkey_manager import (
     generate_reg_options,
     verify_reg_response,
@@ -14,11 +14,12 @@ from passkey_manager import (
 )
 from logger import verify_chain_integrity
 from secure_db import get_db_connection
+import time
 
 app = Flask(__name__)
 app.secret_key = 'SUPER_SECRET_OFFLINE_KEY'
-# Allow CORS for the React frontend
-CORS(app, supports_credentials=True, origins=["http://localhost:5173"])
+# Allow CORS for the React frontend (HTTP & HTTPS) and Mobile IPs
+CORS(app, supports_credentials=True, origins=["http://localhost:5173", "https://localhost:5173", "*"])
 
 @app.route('/api/status')
 def status():
@@ -30,8 +31,8 @@ def login():
     device_id = data.get('device_id')
     token = data.get('token')
     
-    if not device_id or not token:
-        return jsonify({"success": False, "message": "Missing device_id or token"}), 400
+    if not device_id:
+        return jsonify({"success": False, "message": "Missing device_id"}), 400
 
     success, message = verify_login(device_id, token)
     
@@ -82,11 +83,12 @@ def logs():
     # Verify integrity before showing
     is_valid, status_msg = verify_chain_integrity()
     
-    conn = get_db_connection()
-    c = conn.cursor()
-    c.execute("SELECT * FROM audit_logs ORDER BY id DESC")
-    logs_data = [dict(row) for row in c.fetchall()]
-    conn.close()
+    db = get_db_connection()
+    logs_data = list(db.audit_logs.find().sort("_id", -1))
+    
+    # Convert ObjectIds to strings
+    for log in logs_data:
+        log['_id'] = str(log['_id'])
     
     return jsonify({
         "success": True,
@@ -100,6 +102,66 @@ def logout():
     session.pop('user', None)
     return jsonify({"success": True, "message": "Logged out"})
 
+# --- NFC / BLUETOOTH ROUTES ---
+
+@app.route('/api/register/nfc', methods=['POST'])
+def register_nfc_card():
+    data = request.json
+    force_login = data.get('force_login', False)
+    device_id = data.get('device_id', 'Unknown-PC' if force_login else None)
+    nfc_uid = data.get('nfc_uid')
+    
+    if (not device_id and not force_login) or not nfc_uid:
+        return jsonify({"success": False, "message": "Missing device_id or nfc_uid"}), 400
+
+    success, message = register_nfc(device_id, nfc_uid, force_login=force_login)
+    if success:
+        return jsonify({"success": True, "message": message})
+    else:
+        return jsonify({"success": False, "message": message}), 400
+
+@app.route('/api/auth/bluetooth-poll', methods=['POST'])
+def check_bluetooth_login():
+    """
+    Frontend calls this every 2 seconds when in 'Waiting for Bluetooth' mode.
+    """
+    db = get_db_connection()
+    now = time.time()
+    
+    # Find a pending login from the last 10 seconds that hasn't been consumed
+    # We really should have a session ID or something to link it, 
+    # but for this demo, we'll take the most recent authorized tapped card.
+    
+    data = request.json or {}
+    target_device_id = data.get('device_id')
+    
+    # SECURITY FIX: If no device_id is provided, we MUST NOT return any logins.
+    # Otherwise, it would return the most recent login for ANY user (Session Hijacking).
+    if not target_device_id:
+        return jsonify({"success": False, "message": "Missing device_id"}), 200
+
+    query = {
+        "device_id": target_device_id,
+        "consumed": False,
+        "timestamp": {"$gt": now - 10} # Valid for 10 seconds
+    }
+
+    login = db.pending_bluetooth_logins.find_one(query, sort=[("timestamp", -1)])
+    
+    if login:
+        # Mark consumed
+        db.pending_bluetooth_logins.update_one(
+            {"_id": login['_id']},
+            {"$set": {"consumed": True}}
+        )
+        
+        # Log user in
+        device_id = login['device_id']
+        session['user'] = device_id
+        return jsonify({"success": True, "message": "Bluetooth Login Successful", "user": device_id})
+        
+    return jsonify({"success": False, "message": "No login detected"}), 200
+
 # --- PASSKEY ROUTES ---
 
 @app.route('/api/register/passkey/options', methods=['POST'])
@@ -110,11 +172,8 @@ def register_passkey_options():
     if not username:
         return jsonify({"error": "Username required"}), 400
 
-    conn = get_db_connection()
-    c = conn.cursor()
-    c.execute("SELECT * FROM users WHERE device_id = ?", (username,))
-    existing = c.fetchone()
-    conn.close()
+    db = get_db_connection()
+    existing = db.users.find_one({"device_id": username})
 
     if existing:
         user_id = existing['device_id']
@@ -171,10 +230,20 @@ def login_passkey_verify():
     success, user_id_or_error = verify_auth_response(passkey_data, challenge, username_hint)
     
     if success:
+        log_event(f"Passkey Login Success: {user_id_or_error}") # <--- This merges it into the SHA-256 Chain
         session['user'] = user_id_or_error
         return jsonify({"success": True, "message": "Logged in with Passkey", "user": user_id_or_error})
     else:
         return jsonify({"success": False, "message": f"Authentication failed: {user_id_or_error}"}), 400
 
 if __name__ == '__main__':
-    app.run(debug=True, port=5000)
+    # Use persistent SSL certs if available, otherwise adhoc
+    import os
+    if os.path.exists('cert.pem') and os.path.exists('key.pem'):
+        ssl_context = ('cert.pem', 'key.pem')
+        print(" Using persistent SSL certificates.")
+    else:
+        ssl_context = 'adhoc'
+        print(" Warning: Using temporary adhoc SSL certificates.")
+
+    app.run(debug=True, port=5000, host='0.0.0.0', ssl_context=ssl_context)

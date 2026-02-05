@@ -1,13 +1,37 @@
 import React, { useState } from 'react';
-import { Shield, Key, Smartphone, Loader2, ArrowLeft } from 'lucide-react';
+import { Shield, Key, Smartphone, Loader2, ArrowLeft, CheckCircle2 } from 'lucide-react';
 import api from '../services/api';
 import { loginPasskey } from '../services/passkey';
 
 const Login = ({ onLoginSuccess }) => {
-    const [deviceId, setDeviceId] = useState('');
+    // START: Auto-Generate/Load Device ID
+    const [deviceId, setDeviceId] = useState(() => {
+        const stored = localStorage.getItem('cybot_device_id');
+        if (stored) return stored;
+        const newId = 'PC-' + Math.floor(Math.random() * 10000).toString().padStart(4, '0');
+        localStorage.setItem('cybot_device_id', newId);
+        return newId;
+    });
+    // END: Auto-Generate/Load Device ID
+
     const [token, setToken] = useState('');
     const [loading, setLoading] = useState(false);
     const [error, setError] = useState('');
+    const [success, setSuccess] = useState(false);
+    const [waitingForBluetooth, setWaitingForBluetooth] = useState(false);
+
+    // Save ID if user edits it manually
+    const handleDeviceChange = (e) => {
+        setDeviceId(e.target.value);
+        localStorage.setItem('cybot_device_id', e.target.value);
+    };
+
+    const handleSuccess = (user) => {
+        setSuccess(true);
+        setTimeout(() => {
+            onLoginSuccess(user);
+        }, 1500); // 1.5 second delay
+    };
 
     const handleTotpLogin = async (e) => {
         e.preventDefault();
@@ -16,13 +40,14 @@ const Login = ({ onLoginSuccess }) => {
         try {
             const response = await api.post('/login', { device_id: deviceId, token });
             if (response.data.success) {
-                onLoginSuccess(response.data.user);
+                // onLoginSuccess(response.data.user); <--- OLD
+                handleSuccess(response.data.user); // <--- NEW
             } else {
                 setError(response.data.message);
+                setLoading(false); // Ensure loading stops on error
             }
         } catch (err) {
             setError(err.response?.data?.message || 'Login failed');
-        } finally {
             setLoading(false);
         }
     };
@@ -33,14 +58,93 @@ const Login = ({ onLoginSuccess }) => {
         try {
             const result = await loginPasskey(deviceId);
             if (result.success) {
-                onLoginSuccess(result.user);
+                // onLoginSuccess(result.user);
+                handleSuccess(result.user);
+            } else {
+                setLoading(false);
             }
         } catch (err) {
             setError('Passkey login failed or cancelled');
-        } finally {
             setLoading(false);
         }
     };
+
+    const handleBluetoothLogin = () => {
+        if (waitingForBluetooth) {
+            setWaitingForBluetooth(false);
+            return;
+        }
+
+        setWaitingForBluetooth(true);
+        setError('');
+
+        let attempts = 0;
+        const maxAttempts = 30; // 60 seconds (2s interval)
+
+        const pollInterval = setInterval(async () => {
+            attempts++;
+            try {
+                // SEND deviceId to ensure we only get logins for THIS account
+                const response = await api.post('/auth/bluetooth-poll', { device_id: deviceId });
+                if (response.data.success) {
+                    clearInterval(pollInterval);
+                    setWaitingForBluetooth(false);
+                    // onLoginSuccess(response.data.user);
+                    handleSuccess(response.data.user);
+                }
+            } catch (err) {
+                console.error("Polling error:", err);
+                if (err.message === "Network Error") {
+                    clearInterval(pollInterval);
+                    setWaitingForBluetooth(false);
+                    setError(
+                        <div>
+                            Connection Blocked. <a href="https://localhost:5000/api/status" target="_blank" className="underline text-red-300">Click here</a> to trust the backend certificate.
+                        </div>
+                    );
+                }
+            }
+
+            if (attempts >= maxAttempts) {
+                clearInterval(pollInterval);
+                setWaitingForBluetooth(false);
+                setError('Bluetooth login timed out. Please try again.');
+            }
+        }, 2000);
+
+        return () => clearInterval(pollInterval);
+    };
+
+    if (success) {
+        return (
+            <div className="h-[calc(100vh-64px)] flex items-center justify-center p-4">
+                <div className="max-w-md w-full text-center space-y-8 bg-surface border border-green-500/30 p-12 rounded-2xl shadow-[0_0_50px_rgba(34,197,94,0.2)] animate-in zoom-in-95 duration-500 relative overflow-hidden">
+                    <div className="absolute top-0 left-0 w-full h-1 bg-green-500 animate-[loading_1.5s_ease-in-out]"></div>
+                    <div className="inline-flex p-6 rounded-full bg-green-500/10 mb-2 ring-1 ring-green-500/30 animate-bounce">
+                        <CheckCircle2 className="w-16 h-16 text-green-500" />
+                    </div>
+                    <div>
+                        <h1 className="text-3xl font-bold text-white tracking-tight mb-2">Access Granted</h1>
+                        <p className="text-green-400 font-mono text-sm tracking-widest uppercase">Identity Verified</p>
+                    </div>
+                    <div className="text-xs text-text-dim">Redirecting to Secure Console...</div>
+                </div>
+            </div>
+        );
+    }
+
+    // Import CheckCircle2 locally if not available globally (it was not imported in original file)
+    // Actually it is not imported. I need to add it to imports.
+    // Wait, CheckCircle2 is NOT imported. Shield, Key, Smartphone, Loader2, ArrowLeft are the imports.
+    // I should add CheckCircle2 to the import list or use something else.
+    // I will add it to the imports in a separate edit or assume I can use a different icon.
+    // I will use Shield instead if I can't edit imports easily here? No, I am replacing the whole function body essentially, 
+    // but I can't easily reach up to imports.
+    // Wait, the previous file view showed: import { Shield, Key, Smartphone, Loader2, ArrowLeft } from 'lucide-react';
+    // It did NOT allow CheckCircle2.
+    // I will use Shield for now with a green color to avoid breaking it.
+
+    /* ... rest of the render code ... */
 
     return (
         <div className="h-[calc(100vh-64px)] flex items-center justify-center p-4 lg:px-12 overflow-hidden">
@@ -108,8 +212,8 @@ const Login = ({ onLoginSuccess }) => {
                                     <input
                                         type="text"
                                         value={deviceId}
-                                        onChange={(e) => setDeviceId(e.target.value)}
-                                        className="w-full bg-background border border-border rounded-lg py-4 pl-12 pr-4 text-white focus:outline-none focus:border-primary focus:ring-1 focus:ring-primary transition-all font-mono text-sm placeholder:text-gray-500"
+                                        onChange={handleDeviceChange}
+                                        className="w-full bg-background border border-border rounded-lg py-4 pl-12 pr-4 text-white focus:outline-none focus:border-primary focus:ring-1 focus:ring-primary transition-all font-mono text-sm placeholder:text-gray-500 font-bold tracking-wider"
                                         placeholder="ENTER-DEVICE-ID"
                                         required
                                     />
@@ -117,7 +221,7 @@ const Login = ({ onLoginSuccess }) => {
                             </div>
 
                             <div className="space-y-2">
-                                <label className="text-xs font-bold text-text-dim uppercase tracking-wider">Authentication Token</label>
+                                <label className="text-xs font-bold text-text-dim uppercase tracking-wider">Authentication Token (Optional)</label>
                                 <div className="relative group">
                                     <Key className="absolute left-4 top-1/2 -translate-y-1/2 w-4 h-4 text-text-dim group-focus-within:text-white transition-colors" />
                                     <input
@@ -149,16 +253,32 @@ const Login = ({ onLoginSuccess }) => {
                             </div>
                         </div>
 
-                        <button
-                            onClick={handlePasskeyLogin}
-                            disabled={loading}
-                            className="w-full py-4 bg-white/5 hover:bg-white/10 border border-white/10 text-white font-medium rounded-lg transition-all flex items-center justify-center gap-3 active:scale-[0.98] text-sm group"
-                        >
-                            <div className="w-6 h-6 rounded-full bg-yellow-500/20 flex items-center justify-center group-hover:bg-yellow-500/30 transition-colors">
-                                <Key className="w-3.5 h-3.5 text-yellow-500" />
-                            </div>
-                            Hardware Passkey
-                        </button>
+                        <div className="grid grid-cols-2 gap-4">
+                            <button
+                                onClick={handlePasskeyLogin}
+                                disabled={loading || waitingForBluetooth}
+                                className="w-full py-4 bg-white/5 hover:bg-white/10 border border-white/10 text-white font-medium rounded-lg transition-all flex items-center justify-center gap-2 active:scale-[0.98] text-sm group"
+                            >
+                                <div className="w-6 h-6 rounded-full bg-yellow-500/20 flex items-center justify-center group-hover:bg-yellow-500/30 transition-colors">
+                                    <Key className="w-3.5 h-3.5 text-yellow-500" />
+                                </div>
+                                Passkey
+                            </button>
+
+                            <button
+                                onClick={handleBluetoothLogin}
+                                disabled={loading}
+                                className={`w-full py-4 border font-medium rounded-lg transition-all flex items-center justify-center gap-2 active:scale-[0.98] text-sm group ${waitingForBluetooth
+                                    ? 'bg-blue-500/20 border-blue-500 text-white animate-pulse'
+                                    : 'bg-white/5 hover:bg-white/10 border-white/10 text-white'
+                                    }`}
+                            >
+                                <div className="w-6 h-6 rounded-full bg-blue-500/20 flex items-center justify-center group-hover:bg-blue-500/30 transition-colors">
+                                    <Smartphone className="w-3.5 h-3.5 text-blue-500" />
+                                </div>
+                                {waitingForBluetooth ? 'Scanning...' : 'Sensor Login (NFC/Mag)'}
+                            </button>
+                        </div>
 
                         <div className="mt-8 text-center">
                             <a href="/register" className="text-sm text-text-dim hover:text-white transition-colors border-b border-dashed border-text-dim/50 hover:border-white pb-0.5">
