@@ -16,7 +16,7 @@ from webauthn.helpers.structs import (
     AuthenticationCredential,
     AuthenticatorAttachment,
 )
-from secure_db import get_db_connection
+from secure_db import get_db
 
 RP_ID = "localhost"  # Change this to your domain in production
 RP_NAME = "Secure Offline Auth"
@@ -47,100 +47,71 @@ def store_credential(user_id, credential_id, public_key, sign_count, transports=
     """
     Store the verified credential in the database.
     """
-    conn = get_db_connection()
-    c = conn.cursor()
+    db = get_db()
+    credentials = db.credentials
     # Normalize transports to None if empty list
     transports_str = ",".join(transports) if transports else None
     
     try:
-        c.execute('''
-            INSERT INTO credentials (user_id, credential_id, public_key, sign_count, transports)
-            VALUES (?, ?, ?, ?, ?)
-        ''', (user_id, credential_id, public_key, sign_count, transports_str))
-        conn.commit()
+        credentials.insert_one({
+            "user_id": user_id,
+            "credential_id": credential_id, # This is bytes
+            "public_key": public_key,       # This is bytes
+            "sign_count": sign_count,
+            "transports": transports_str
+        })
+        print(f"✓ Passkey credential stored successfully for user: {user_id}")
     except Exception as e:
-        print(f"Error storing credential: {e}")
-        conn.close()
+        print(f"✗ Error storing credential: {e}")
         return False, str(e)
     
-    conn.close()
     return True, "Success"
+
 
 def get_credentials(user_id):
     """
     Retrieve credentials for a given user.
     """
-    conn = get_db_connection()
-    c = conn.cursor()
-    c.execute('SELECT * FROM credentials WHERE user_id = ?', (user_id,))
-    rows = c.fetchall()
-    conn.close()
-    return rows
+    db = get_db()
+    credentials = db.credentials
+    # Return list of dicts
+    return list(credentials.find({"user_id": user_id}))
 
 def verify_reg_response(response_data, challenge, user_id):
     """
     Verify the response from the browser after user registration.
     """
     try:
-        # Normalize to Dict first for consistency / fallback
+        import json
+        from webauthn.helpers.structs import AuthenticatorAttestationResponse
+        
+        # Normalize to dict
         if isinstance(response_data, str):
-            import json
             data = json.loads(response_data)
         elif isinstance(response_data, dict):
             data = response_data
         else:
             return False, "Invalid response_data type"
-
-        credential = None
         
-        # 1. Try Pydantic V2 'model_validate' (Takes Dict)
-        if hasattr(RegistrationCredential, "model_validate"):
-             try: credential = RegistrationCredential.model_validate(data)
-             except: pass
+        # Manual construction for webauthn 2.7.0
+        # Build the response object first
+        response_dict = data.get('response', {})
         
-        # 2. Try Pydantic V1 'parse_obj' (Takes Dict)
-        if not credential and hasattr(RegistrationCredential, "parse_obj"):
-             try: credential = RegistrationCredential.parse_obj(data)
-             except: pass
-             
-        # 3. Try Pydantic V2 'model_validate_json' (Takes Str) - re-dump if needed
-        if not credential and hasattr(RegistrationCredential, "model_validate_json"):
-             try: 
-                 import json
-                 credential = RegistrationCredential.model_validate_json(json.dumps(data))
-             except: pass
-
-        if not credential:
-             # Last resort: Try converting keys from camelCase to snake_case for direct init
-             mapped_data = data.copy()
-             if 'rawId' in mapped_data: mapped_data['raw_id'] = mapped_data.pop('rawId')
-             if 'clientExtensionResults' in mapped_data: mapped_data['client_extension_results'] = mapped_data.pop('clientExtensionResults')
-             if 'authenticatorAttachment' in mapped_data: mapped_data['authenticator_attachment'] = mapped_data.pop('authenticatorAttachment')
-             
-             # Nested 'response' mapping
-             if 'response' in mapped_data and isinstance(mapped_data['response'], dict):
-                 resp = mapped_data['response'].copy()
-                 if 'clientDataJSON' in resp: resp['client_data_json'] = resp.pop('clientDataJSON')
-                 if 'attestationObject' in resp: resp['attestation_object'] = resp.pop('attestationObject')
-                 if 'authenticatorData' in resp: resp['authenticator_data'] = resp.pop('authenticatorData')
-                 if 'userHandle' in resp: resp['user_handle'] = resp.pop('userHandle')
-                 mapped_data['response'] = resp
-
-             try:
-                # Retry validation/init with snake_case data
-                if hasattr(RegistrationCredential, "model_validate"): 
-                    credential = RegistrationCredential.model_validate(mapped_data)
-                elif hasattr(RegistrationCredential, "parse_obj"):
-                    credential = RegistrationCredential.parse_obj(mapped_data)
-                else:
-                    credential = RegistrationCredential(**mapped_data)
-             except Exception as e:
-                # If that fails, final Hail Mary
-                try:
-                    credential = RegistrationCredential(**data)
-                except:
-                    raise e
-
+        # Create AuthenticatorAttestationResponse manually
+        attestation_response = AuthenticatorAttestationResponse(
+            client_data_json=base64url_to_bytes(response_dict['clientDataJSON']),
+            attestation_object=base64url_to_bytes(response_dict['attestationObject'])
+        )
+        
+        # Now create the RegistrationCredential with the response object
+        credential = RegistrationCredential(
+            id=data['id'],
+            raw_id=base64url_to_bytes(data['rawId']),
+            response=attestation_response,
+            type=data.get('type', 'public-key')
+        )
+        
+        print("✓ Successfully constructed credential manually")
         registration_verification = verify_registration_response(
             credential=credential,
             expected_challenge=base64url_to_bytes(challenge),
@@ -270,8 +241,9 @@ def verify_auth_response(response_data, challenge, user_id):
         # ... logic continues ...
         
         # Look up credential in DB
-        conn = get_db_connection()
-        c = conn.cursor()
+        db = get_db()
+        credentials = db.credentials
+        
         # Handle the fact that credential.id is base64url string, but we might store as BLOB or string
         # passkey.js sends id as base64url string.
         # We store credential_id as BLOB in DB (from registration).
@@ -279,9 +251,7 @@ def verify_auth_response(response_data, challenge, user_id):
         # credential.raw_id is bytes. Let's use that.
         cred_id_bytes = credential.raw_id
         
-        c.execute('SELECT * FROM credentials WHERE credential_id = ?', (cred_id_bytes,))
-        row = c.fetchone()
-        conn.close()
+        row = credentials.find_one({"credential_id": cred_id_bytes})
         
         if not row:
             print("Credential not found in DB")
@@ -300,11 +270,10 @@ def verify_auth_response(response_data, challenge, user_id):
         )
         
         # Update sign count
-        step_conn = get_db_connection()
-        step_c = step_conn.cursor()
-        step_c.execute('UPDATE credentials SET sign_count = ? WHERE id = ?', (auth_verification.new_sign_count, row['id']))
-        step_conn.commit()
-        step_conn.close()
+        credentials.update_one(
+            {"_id": row['_id']},
+            {"$set": {"sign_count": auth_verification.new_sign_count}}
+        )
         
         return True, row['user_id']
     except Exception as e:

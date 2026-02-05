@@ -1,6 +1,6 @@
 import pyotp
 import uuid
-from secure_db import get_db_connection
+from secure_db import get_db
 from logger import log_event
 
 APP_NAME = "SecureOfflineAuth"
@@ -13,16 +13,22 @@ def register_device(custom_id=None):
     device_id = custom_id if custom_id else str(uuid.uuid4())
     secret_seed = pyotp.random_base32()
 
-    conn = get_db_connection()
-    c = conn.cursor()
-    try:
-        c.execute("INSERT INTO users (device_id, secret_seed) VALUES (?, ?)", (device_id, secret_seed))
-        conn.commit()
-    except Exception as e:
-        conn.close()
+    db = get_db()
+    users = db.users
+    
+    # Check if user already exists
+    if users.find_one({"device_id": device_id}):
         return None, None # Duplicate ID
-    conn.close()
 
+    try:
+        users.insert_one({
+            "device_id": device_id, 
+            "secret_seed": secret_seed
+        })
+    except Exception as e:
+        print(f"Error registering device: {e}")
+        return None, None
+    
     log_event(f"Device Registered: {device_id}")
     return device_id, secret_seed
 
@@ -33,17 +39,16 @@ def verify_login(device_id, token):
     """
     The 'Offline' Verification.
     """
-    conn = get_db_connection()
-    c = conn.cursor()
-    c.execute("SELECT secret_seed FROM users WHERE device_id = ?", (device_id,))
-    row = c.fetchone()
-    conn.close()
+    db = get_db()
+    users = db.users
+    
+    user = users.find_one({"device_id": device_id})
 
-    if not row:
+    if not user:
         log_event(f"Login Failed: Unknown Device {device_id}")
         return False, "Device not found"
 
-    secret_seed = row['secret_seed']
+    secret_seed = user['secret_seed']
     totp = pyotp.TOTP(secret_seed)
     
     # Verify with a slight window (backup for clock drift)

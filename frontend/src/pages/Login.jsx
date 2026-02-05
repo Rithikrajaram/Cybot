@@ -1,5 +1,6 @@
 import React, { useState } from 'react';
-import { Shield, Key, Smartphone, Loader2, ArrowLeft } from 'lucide-react';
+import { Link } from 'react-router-dom';
+import { Shield, Key, Smartphone, Loader2, ArrowLeft, Activity } from 'lucide-react';
 import api from '../services/api';
 import { loginPasskey } from '../services/passkey';
 
@@ -160,10 +161,22 @@ const Login = ({ onLoginSuccess }) => {
                             Hardware Passkey
                         </button>
 
+                        <Link
+                            to="/voice-auth"
+                            className="w-full py-4 bg-white/5 hover:bg-white/10 border border-white/10 text-white font-medium rounded-lg transition-all flex items-center justify-center gap-3 active:scale-[0.98] text-sm group"
+                        >
+                            <div className="w-6 h-6 rounded-full bg-purple-500/20 flex items-center justify-center group-hover:bg-purple-500/30 transition-colors">
+                                <Activity className="w-3.5 h-3.5 text-purple-500" />
+                            </div>
+                            Voice Login
+                        </Link>
+
+
+
                         <div className="mt-8 text-center">
-                            <a href="/register" className="text-sm text-text-dim hover:text-white transition-colors border-b border-dashed border-text-dim/50 hover:border-white pb-0.5">
+                            <Link to="/register" className="text-sm text-text-dim hover:text-white transition-colors border-b border-dashed border-text-dim/50 hover:border-white pb-0.5">
                                 Initialize New Device
-                            </a>
+                            </Link>
                         </div>
                     </div>
                 </div>

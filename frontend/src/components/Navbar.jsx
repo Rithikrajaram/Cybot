@@ -1,4 +1,4 @@
-import React from 'react';
+import { Link } from 'react-router-dom';
 import { Shield, LayoutDashboard, History, LogOut } from 'lucide-react';
 import api from '../services/api';
 
@@ -27,14 +27,14 @@ const Navbar = ({ user, onLogout }) => {
 
                     {user && (
                         <div className="flex items-center gap-1">
-                            <a href="/dashboard" className="flex items-center gap-2 px-4 py-2 text-sm font-medium text-text-dim hover:text-white hover:bg-white/5 rounded-lg transition-all">
+                            <Link to="/dashboard" className="flex items-center gap-2 px-4 py-2 text-sm font-medium text-text-dim hover:text-white hover:bg-white/5 rounded-lg transition-all">
                                 <LayoutDashboard className="w-4 h-4" />
                                 Dashboard
-                            </a>
-                            <a href="/logs" className="flex items-center gap-2 px-4 py-2 text-sm font-medium text-text-dim hover:text-white hover:bg-white/5 rounded-lg transition-all">
+                            </Link>
+                            <Link to="/logs" className="flex items-center gap-2 px-4 py-2 text-sm font-medium text-text-dim hover:text-white hover:bg-white/5 rounded-lg transition-all">
                                 <History className="w-4 h-4" />
                                 Logs
-                            </a>
+                            </Link>
                             <div className="h-6 w-px bg-white/10 mx-2"></div>
                             <button
                                 onClick={handleLogout}

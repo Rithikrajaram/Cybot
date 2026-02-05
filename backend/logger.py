@@ -1,7 +1,7 @@
 import hashlib
 import json
 from datetime import datetime
-from secure_db import get_db_connection
+from secure_db import get_db
 
 GENESIS_HASH = "0" * 64
 
@@ -13,15 +13,14 @@ def log_event(event_data):
     """
     Logs an event into the immutable hash chain.
     """
-    conn = get_db_connection()
-    c = conn.cursor()
+    db = get_db()
+    audit_logs = db.audit_logs
 
-    # Get the last hash
-    c.execute("SELECT current_hash FROM audit_logs ORDER BY id DESC LIMIT 1")
-    row = c.fetchone()
+    # Get the last hash (using _id desc which roughly correlates to insertion time)
+    last_log = audit_logs.find_one(sort=[("_id", -1)])
     
-    if row:
-        previous_hash = row['current_hash']
+    if last_log:
+        previous_hash = last_log['current_hash']
     else:
         previous_hash = GENESIS_HASH
 
@@ -30,13 +29,13 @@ def log_event(event_data):
     # Calculate new hash binding the previous one
     current_hash = calculate_hash(previous_hash, event_data, timestamp)
 
-    c.execute('''
-        INSERT INTO audit_logs (previous_hash, event_data, timestamp, current_hash)
-        VALUES (?, ?, ?, ?)
-    ''', (previous_hash, event_data, timestamp, current_hash))
+    audit_logs.insert_one({
+        "previous_hash": previous_hash,
+        "event_data": event_data,
+        "timestamp": timestamp,
+        "current_hash": current_hash
+    })
 
-    conn.commit()
-    conn.close()
     return current_hash
 
 def verify_chain_integrity():
@@ -44,11 +43,14 @@ def verify_chain_integrity():
     Re-calculates the entire chain to find tampering.
     Returns: (True, "OK") or (False, "Broken at ID: X")
     """
-    conn = get_db_connection()
-    c = conn.cursor()
-    c.execute("SELECT * FROM audit_logs ORDER BY id ASC")
-    rows = c.fetchall()
-    conn.close()
+    db = get_db()
+    audit_logs = db.audit_logs
+    
+    # Sort by _id to traverse in insertion order
+    cursor = audit_logs.find().sort("_id", 1)
+    
+    # Convert cursor to list to check if empty (or count)
+    rows = list(cursor)
 
     if not rows:
         return True, "Empty Log"
@@ -59,7 +61,8 @@ def verify_chain_integrity():
         calc_hash = calculate_hash(last_hash, row['event_data'], row['timestamp'])
         
         if calc_hash != row['current_hash']:
-            return False, f"Integrity Failure at ID: {row['id']}"
+            # Use _id as identifier since we don't have integer ID anymore
+            return False, f"Integrity Failure at ID: {row['_id']}"
         
         last_hash = row['current_hash']
 
