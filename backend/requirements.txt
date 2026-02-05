@@ -1,0 +1,8 @@
+flask
+flask-cors
+pyotp
+qrcode
+pyopenssl
+webauthn
+cryptography
+Pillow
