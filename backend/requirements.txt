@@ -1,0 +1,14 @@
+flask
+flask-cors
+pyotp
+qrcode
+pyopenssl
+webauthn
+cryptography
+Pillow
+pymongo
+dnspython
+face_recognition
+numpy
+opencv-python
+python-dotenv
