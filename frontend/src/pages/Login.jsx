@@ -1,11 +1,13 @@
 import React, { useState, useEffect } from 'react';
-import { Shield, Key, Smartphone, Loader2, ArrowLeft, Camera, Zap } from 'lucide-react';
+import { Shield, Key, Smartphone, Loader2, ArrowLeft, Camera, Zap, Mic } from 'lucide-react';
+import { useNavigate } from 'react-router-dom';
 import api from '../services/api';
 import { loginPasskey } from '../services/passkey';
 import { loginFace } from '../services/api';
 import FaceCapture from '../components/FaceCapture';
 
 const Login = ({ onLoginSuccess }) => {
+    const navigate = useNavigate();
     const [deviceId, setDeviceId] = useState(() => {
         const stored = localStorage.getItem('cybot_device_id');
         if (stored) return stored;
@@ -262,12 +264,23 @@ const Login = ({ onLoginSuccess }) => {
                             <button
                                 onClick={toggleMobileWait}
                                 disabled={loading}
-                                className="w-full py-3 bg-white/5 hover:bg-white/10 border border-white/10 text-white font-medium rounded-lg transition-all flex flex-col xl:flex-row items-center justify-center gap-3 active:scale-[0.98] text-sm group col-span-2"
+                                className="w-full py-3 bg-white/5 hover:bg-white/10 border border-white/10 text-white font-medium rounded-lg transition-all flex flex-col xl:flex-row items-center justify-center gap-3 active:scale-[0.98] text-sm group"
                             >
                                 <div className="w-6 h-6 rounded-full bg-purple-500/20 flex items-center justify-center group-hover:bg-purple-500/30 transition-colors">
                                     <Zap className="w-3.5 h-3.5 text-purple-400" />
                                 </div>
                                 <span>Mobile Key Tap</span>
+                            </button>
+
+                            <button
+                                onClick={() => navigate('/voice-auth', { state: { mode: 'authenticate' } })}
+                                disabled={loading}
+                                className="w-full py-3 bg-white/5 hover:bg-white/10 border border-white/10 text-white font-medium rounded-lg transition-all flex flex-col xl:flex-row items-center justify-center gap-3 active:scale-[0.98] text-sm group"
+                            >
+                                <div className="w-6 h-6 rounded-full bg-primary/20 flex items-center justify-center group-hover:bg-primary/30 transition-colors">
+                                    <Mic className="w-3.5 h-3.5 text-primary" />
+                                </div>
+                                <span>Voice ID</span>
                             </button>
                         </div>
 

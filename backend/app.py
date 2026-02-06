@@ -18,10 +18,27 @@ from sync_manager import sync_manager
 import time
 import os
 from dotenv import load_dotenv
+import tempfile
+import whisper
+import numpy as np
+import imageio_ffmpeg
 
 load_dotenv()
 
+# Ensure ffmpeg is found (required by Whisper)
+FFMPEG_PATH = imageio_ffmpeg.get_ffmpeg_exe()
+os.environ["PATH"] += os.pathsep + os.path.dirname(FFMPEG_PATH)
+
+# Initialize Local Whisper (Base English-only model for better accuracy)
+print("Loading Local Whisper English Model (base.en)... (may take a moment)")
+whisper_model = whisper.load_model("base.en")
+print("Whisper English Model (base.en) Loaded! 🎙️🇬🇧")
+
+from voice_auth import VoiceAuthenticator
+voice_authenticator = VoiceAuthenticator(threshold=0.7)
+
 app = Flask(__name__)
+app.config['MAX_CONTENT_LENGTH'] = 32 * 1024 * 1024 # 32MB Upload Limit
 app.secret_key = os.getenv("SECRET_KEY", "SUPER_SECRET_OFFLINE_KEY")
 # Allow CORS for the React frontend (HTTP & HTTPS) and Mobile IPs
 CORS(app, supports_credentials=True, origins=["http://localhost:5173", "https://localhost:5173", "*"])
@@ -285,6 +302,156 @@ def login_passkey_verify():
     else:
         return jsonify({"success": False, "message": f"Authentication failed: {user_id_or_error}"}), 400
 
+# --- VOICE AUTH ROUTES (NEW) ---
+from voice_manager import store_voice_pattern, get_voice_pattern
+
+@app.route('/api/voice/register', methods=['POST'])
+def voice_register():
+    """
+    Register a voice spectral pattern and secret phrase (Local Whisper).
+    """
+    try:
+        data = request.json
+        user_id = data.get('user_id')
+        spectral_data = data.get('audio_data') 
+        audio_blob_b64 = data.get('audio_blob')
+
+        if not user_id or not spectral_data or not audio_blob_b64:
+            return jsonify({"success": False, "message": "Missing required data"}), 400
+
+        # 1. Local Transcription with Whisper
+        audio_bytes = base64.b64decode(audio_blob_b64)
+        with tempfile.NamedTemporaryFile(delete=False, suffix=".webm") as tmp:
+            tmp.write(audio_bytes)
+            tmp_path = tmp.name
+
+        try:
+            result = whisper_model.transcribe(tmp_path, fp16=False, language="en", task="transcribe")
+            voice_text = result['text'].strip().lower().replace(".", "").replace(",", "")
+            os.remove(tmp_path)
+        except Exception as e:
+            if os.path.exists(tmp_path): os.remove(tmp_path)
+            print(f"Whisper Error: {e}")
+            return jsonify({"success": False, "message": f"Whisper error: {str(e)}"}), 500
+
+        if not voice_text:
+             return jsonify({
+                 "success": False, 
+                 "message": "Whisper could not hear any words. Speak louder!"
+             }), 400
+
+        # 2. Store in DB
+        if store_voice_pattern(user_id, spectral_data, voice_text):
+             return jsonify({
+                 "success": True, 
+                 "message": f"Registered! Whisper heard: '{voice_text}'",
+                 "recognized_text": voice_text
+             })
+        else:
+            return jsonify({"success": False, "message": "Database error."}), 500
+
+    except Exception as e:
+        return jsonify({"success": False, "message": f"Error: {str(e)}"}), 500
+
+print("DEBUG: Registering /api/voice/authenticate route")
+@app.route('/api/voice/authenticate', methods=['POST'])
+def authenticate_voice():
+    """
+    Strict Hybrid Authentication (100% Local Whisper):
+    """
+    try:
+        data = request.json
+        user_id = data.get('user_id')
+        spectral_input = data.get('audio_data')
+        audio_blob_b64 = data.get('audio_blob')
+
+        if not user_id or not spectral_input or not audio_blob_b64:
+            return jsonify({"success": False, "message": "Missing required data"}), 400
+
+        # 1. Local Transcription with Whisper
+        audio_bytes = base64.b64decode(audio_blob_b64)
+        with tempfile.NamedTemporaryFile(delete=False, suffix=".webm") as tmp:
+            tmp.write(audio_bytes)
+            tmp_path = tmp.name
+
+        try:
+            result = whisper_model.transcribe(tmp_path, fp16=False, language="en", task="transcribe")
+            input_text = result['text'].strip().lower().replace(".", "").replace(",", "")
+            os.remove(tmp_path)
+        except Exception as e:
+            if os.path.exists(tmp_path): os.remove(tmp_path)
+            print(f"Whisper Error during Auth: {e}")
+            return jsonify({"success": False, "message": f"Whisper failed: {str(e)}"}), 500
+
+        if not input_text:
+             return jsonify({
+                 "success": False, 
+                 "message": "Whisper could not hear any words. Speak clearly!"
+             }), 400
+
+        # 2. Get Stored Data
+        stored_data = get_voice_pattern(user_id)
+        if not stored_data or not stored_data.get("pattern"):
+            return jsonify({"success": False, "message": "No voice print for this user."}), 404
+
+        stored_print = stored_data["pattern"]
+        stored_text = stored_data.get("text", "").lower().strip()
+
+        # 3. Security Checks (Text + Lenient Rhythm check +/- 50)
+        text_match = (input_text == stored_text)
+        
+        # Strip silence before comparing "rhythm" (frame counts)
+        s1_stripped = voice_authenticator.extract_voice_print(stored_print)
+        s2_stripped = voice_authenticator.extract_voice_print(spectral_input)
+        
+        input_frames = len(s2_stripped)
+        stored_frames = len(s1_stripped)
+        frame_diff = abs(input_frames - stored_frames)
+        # Increased tolerance to 50 as requested for better usability
+        frame_match = frame_diff <= 50
+
+        print(f"DEBUG LOCAL AUTH: Text: '{input_text}' vs '{stored_text}' | Match: {text_match}")
+        print(f"DEBUG LOCAL AUTH: Stripped Frames: {input_frames} vs {stored_frames} | Diff: {frame_diff} | Match: {frame_match}")
+
+        # Security: Fail if text or frame rhythm is way off
+        if not text_match:
+            return jsonify({
+                "success": False, 
+                "message": f"Phrase mismatch. Whisper heard: '{input_text}' (Stored: '{stored_text}')",
+                "recognized_text": input_text
+            }), 401
+        
+        if not frame_match:
+            return jsonify({
+                "success": False, 
+                "message": f"Rhythm mismatch (Frames diff: {frame_diff} > 50). Try speaking at your registered speed.",
+                "recognized_text": input_text
+            }), 401
+
+        # 4. Spectral Verification
+        original_threshold = voice_authenticator.threshold
+        voice_authenticator.threshold = original_threshold * 1.5 
+        success, message, distance = voice_authenticator.verify_voice(stored_print, spectral_input)
+        voice_authenticator.threshold = original_threshold
+
+        if success:
+             session['user'] = user_id
+             return jsonify({
+                 "success": True, 
+                 "message": f"Access Granted! (Whisper word: '{input_text}')",
+                 "user": user_id,
+                 "recognized_text": input_text
+             })
+        else:
+             return jsonify({
+                 "success": False, 
+                 "message": f"Voice match failed (Spectral diff: {distance:.3f}).",
+                 "recognized_text": input_text
+             }), 401
+
+    except Exception as e:
+        return jsonify({"success": False, "message": f"Error: {str(e)}"}), 500
+
 # --- FACE AUTH ROUTES ---
 from face_auth_manager import register_face, verify_face_liveness, verify_face_login
 
@@ -335,4 +502,6 @@ if __name__ == '__main__':
         ssl_context = 'adhoc'
         print(" Warning: Using temporary adhoc SSL certificates.")
 
+    print("Routes registered:")
+    print(app.url_map)
     app.run(debug=True, port=5000, host='0.0.0.0', ssl_context=ssl_context)

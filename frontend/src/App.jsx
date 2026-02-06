@@ -10,6 +10,7 @@ import api from './services/api';
 import Landing from './pages/Landing';
 import MobileTap from './pages/MobileTap.jsx';
 import SensorCheck from './pages/SensorCheck.jsx';
+import VoiceAuth from './pages/VoiceAuth.jsx';
 
 function App() {
   const [user, setUser] = useState(null);
@@ -60,6 +61,7 @@ function App() {
             <Route path="/logs" element={user ? <Logs /> : <Navigate to="/" />} />
             <Route path="/mobile-tap" element={<MobileTap />} />
             <Route path="/sensor-check" element={<SensorCheck />} />
+            <Route path="/voice-auth" element={user ? <Navigate to="/dashboard" /> : <VoiceAuth onLoginSuccess={handleLoginSuccess} />} />
           </Routes>
         </main>
       </div>

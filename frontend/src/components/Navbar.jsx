@@ -1,6 +1,7 @@
 import React from 'react';
-import { Shield, LayoutDashboard, History, LogOut } from 'lucide-react';
+import { Shield, LayoutDashboard, History, LogOut, Mic } from 'lucide-react';
 import api from '../services/api';
+
 
 const Navbar = ({ user, onLogout }) => {
     const handleLogout = async () => {
@@ -47,7 +48,7 @@ const Navbar = ({ user, onLogout }) => {
                     )}
                 </div>
             </div>
-        </nav>
+        </nav >
     );
 };
 

@@ -1,5 +1,5 @@
 import React from 'react';
-import { Shield, ChevronRight, Smartphone, Key, Lock, Fingerprint, Globe, Server, Activity, FileCheck, ScanFace, Database, Zap } from 'lucide-react';
+import { Shield, ChevronRight, Smartphone, Key, Lock, Fingerprint, Globe, Server, Activity, FileCheck, ScanFace, Database, Zap, Mic } from 'lucide-react';
 import { Link } from 'react-router-dom';
 
 const Landing = () => {
@@ -129,6 +129,7 @@ const Landing = () => {
                             <p className="text-[10px] text-text-dim mt-1">Hall Effect Radar</p>
                         </div>
                     </div>
+
 
                     <div className="row-span-1 col-span-2 bg-white/5 border border-white/10 rounded-2xl flex items-center px-6 gap-4 hover:border-white/20 transition-colors">
                         <div className="flex items-center gap-2">

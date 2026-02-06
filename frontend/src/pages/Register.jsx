@@ -1,11 +1,13 @@
 import React, { useState } from 'react';
-import { Shield, Smartphone, ArrowLeft, CheckCircle2, Copy, Download, Key, Camera } from 'lucide-react';
+import { Shield, Smartphone, ArrowLeft, CheckCircle2, Copy, Download, Key, Camera, Mic } from 'lucide-react';
+import { useNavigate } from 'react-router-dom';
 import api from '../services/api';
 import { registerPasskey } from '../services/passkey';
 import { registerFace } from '../services/api';
 import FaceCapture from '../components/FaceCapture';
 
 const Register = () => {
+    const navigate = useNavigate();
     const [deviceName, setDeviceName] = useState('');
     const [loading, setLoading] = useState(false);
     const [error, setError] = useState('');
@@ -197,6 +199,9 @@ const Register = () => {
                             </button>
                             <button onClick={() => { if (!deviceName) { setError("Enter Device Name first"); return; } resetFaceAuth(); setShowFaceAuth(true); }} disabled={loading} className="w-full py-4 bg-white/5 hover:bg-white/10 border border-white/10 text-white font-medium rounded-lg transition-all flex flex-col xl:flex-row items-center justify-center gap-3 active:scale-[0.98] text-sm group">
                                 <Camera className="w-3.5 h-3.5 text-blue-400" /><span>Face ID</span>
+                            </button>
+                            <button onClick={() => { if (!deviceName) { setError("Enter Device Name first"); return; } navigate('/voice-auth', { state: { mode: 'register' } }); }} disabled={loading} className="w-full py-4 bg-white/5 hover:bg-white/10 border border-white/10 text-white font-medium rounded-lg transition-all flex flex-col xl:flex-row items-center justify-center gap-3 active:scale-[0.98] text-sm group col-span-2">
+                                <Mic className="w-3.5 h-3.5 text-primary" /><span>Voice ID</span>
                             </button>
                         </div>
                     </div>
